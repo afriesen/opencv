@@ -223,9 +223,7 @@ bool LogisticRegressionImpl::train(const Ptr<TrainData>& trainData, int)
         as in multi class class scenario, we will have n thetas for n classes */
         thetas.create(num_classes, data_t.cols, CV_32F);
 
-//        Mat new_theta;
         Mat labels_binary, labels_bin_val;
-//        Mat labels, labels_val;
         int ii = 0;
         for(map<int,int>::iterator it = this->forward_mapper.begin(); it != this->forward_mapper.end(); ++it)
         {
@@ -244,9 +242,6 @@ bool LogisticRegressionImpl::train(const Ptr<TrainData>& trainData, int)
 //            hconcat(new_theta.t(), thetas.row(ii));
             ii += 1;
         }
-
-//        train_multiclass( data_t, labels_l, _data_val, _labels_val,
-//                thetas, init_theta, params.train_parallel );
     }
 
     // check that the estimates are stable and finite
@@ -261,31 +256,6 @@ bool LogisticRegressionImpl::train(const Ptr<TrainData>& trainData, int)
     return ok;
 }
 
-//void LogisticRegressionImpl::train_multiclass( const Mat & data_t,
-//        const Mat & labels_l, const Mat & _data_val, const Mat & _labels_val,
-//        const Mat & thetas, const Mat & init_theta, bool parallelize ) {
-//    Mat new_theta;
-//    Mat labels_binary, labels_bin_val;
-//    Mat labels, labels_val;
-//    int ii = 0;
-//    for(map<int,int>::iterator it = this->forward_mapper.begin(); it != this->forward_mapper.end(); ++it)
-//    {
-//        // one-vs-rest (OvR) scheme
-//        labels_binary = (labels_l == it->second)/255;
-//        labels_binary.convertTo(labels, CV_32F);
-//
-//        labels_bin_val = (_labels_val == it->second)/255;
-//        labels_bin_val.convertTo(labels_val, CV_32S);
-//
-//        if( params.train_method == BATCH)
-//            new_theta = batch_gradient_descent(data_t, labels, init_theta, _data_val, labels_val, training_perf.col(ii));
-//        else
-//            new_theta = mini_batch_gradient_descent(data_t, labels, init_theta, _data_val, labels_val, training_perf.col(ii));
-//        thetas.row(ii) = new_theta.t();
-////            hconcat(new_theta.t(), thetas.row(ii));
-//        ii += 1;
-//    }
-//}
 
 float LogisticRegressionImpl::predict(InputArray samples, OutputArray results, int flags) const
 {
@@ -322,20 +292,15 @@ float LogisticRegressionImpl::compute_prediction(InputArray samples,
     }
 
     // add a column of ones to the data (bias/intercept term)
-    Mat data_t;
-    hconcat( cv::Mat::ones( data.rows, 1, CV_32F ), data, data_t );
-//    Mat data_t = data;
-    CV_Assert(data_t.cols == thetas.cols);
-//    CV_Assert(data_t.cols+1 == thetas.cols);
+    CV_Assert(data.cols+1 == thetas.cols);
 
     // predict class labels for samples (handles binary and multiclass cases)
-    Mat labels_c(data_t.rows, 1, CV_32S);
+    Mat labels_c(data.rows, 1, CV_32S);
     Mat pred_m;
     Mat temp_pred;
     if(thetas.rows == 1)
     {
         // apply sigmoid function
-//        temp_pred = calc_sigmoid(data_t * thetas.t());
         temp_pred = calc_sigmoid(data * thetas.colRange(1, thetas.cols).t() +
                 thetas.at< float >( 0, 0 ) );
 
@@ -349,10 +314,9 @@ float LogisticRegressionImpl::compute_prediction(InputArray samples,
     else
     {
         // apply sigmoid function
-        pred_m.create(data_t.rows, thetas.rows, data.type());
+        pred_m.create(data.rows, thetas.rows, data.type());
         for(int i = 0; i < thetas.rows; i++)
         {
-//            temp_pred = calc_sigmoid(data_t * thetas.row(i).t());
             temp_pred = calc_sigmoid(data * thetas.row(i).colRange(1, thetas.cols).t() +
                     thetas.row(i).at< float >( 0, 0 ) );
 
@@ -366,13 +330,11 @@ float LogisticRegressionImpl::compute_prediction(InputArray samples,
             temp_pred = pred_m.row(i);
             minMaxLoc( temp_pred, NULL, NULL, NULL, &max_loc );
             labels_c.at< int >(i, 0) = max_loc.x;
-//            labels.push_back(max_loc.x);
         }
     }
 
     // return label of the predicted class. class names can be 1,2,3,...
     remap_labels(labels_c, this->reverse_mapper);
-//    pred_labs.convertTo(pred_labs, CV_32S);
 
     // return either the labels or the raw output
     if ( results.needed() )
