@@ -71,6 +71,11 @@ public:
         train_method = LogisticRegression::BATCH;
         mini_batch_size = 1;
         term_crit = TermCriteria(TermCriteria::COUNT + TermCriteria::EPS, num_iters, alpha);
+        test_data_is_validation = false;
+        max_iters_no_improvement = 20;
+        record_train_freq = 100;
+        train_parallel = true;
+        decrease_alpha = true;
     }
 
     double alpha; //!< learning rate.
@@ -79,6 +84,12 @@ public:
     int train_method;
     int mini_batch_size;
     TermCriteria term_crit;
+    bool test_data_is_validation; //!< true to use the test portion of the input training data as a validation set
+    int max_iters_no_improvement; //!< max number of iterations to keep training if there's no improvement on validation set accuracy
+    bool record_training; //!< true to record the cost and validation accuracy (if computed) for each training iteration
+    int record_train_freq;
+    bool train_parallel;
+    bool decrease_alpha; // true to decrease the learning rate if no progress is being made relative to the validation set
 };
 
 class LogisticRegressionImpl : public LogisticRegression
@@ -94,6 +105,9 @@ public:
     CV_IMPL_PROPERTY(int, TrainMethod, params.train_method)
     CV_IMPL_PROPERTY(int, MiniBatchSize, params.mini_batch_size)
     CV_IMPL_PROPERTY(TermCriteria, TermCriteria, params.term_crit)
+    CV_IMPL_PROPERTY(bool, UseValidationData, params.test_data_is_validation )
+    CV_IMPL_PROPERTY(int, MaxItersNoValidImprovement, params.max_iters_no_improvement )
+    CV_IMPL_PROPERTY(bool, RecordTrainingPerf, params.record_training )
 
     virtual bool train( const Ptr<TrainData>& trainData, int=0 );
     virtual float predict(InputArray samples, OutputArray results, int flags=0) const;
@@ -101,21 +115,27 @@ public:
     virtual void write(FileStorage& fs) const;
     virtual void read(const FileNode& fn);
     virtual Mat get_learnt_thetas() const { return learnt_thetas; }
+    virtual Mat2f getTrainingPerf() const { return training_perf; }
     virtual int getVarCount() const { return learnt_thetas.cols; }
     virtual bool isTrained() const { return !learnt_thetas.empty(); }
     virtual bool isClassifier() const { return true; }
     virtual String getDefaultName() const { return "opencv_ml_lr"; }
 protected:
+//    void train_multiclass( const Mat & data_t,
+//            const Mat & labels_l, const Mat & _data_val, const Mat & _labels_val,
+//            const Mat & thetas, const Mat & init_theta, bool parallelize );
+    float compute_prediction(InputArray samples, const Mat& _thetas, OutputArray results, int flags ) const;
     Mat calc_sigmoid(const Mat& data) const;
     double compute_cost(const Mat& _data, const Mat& _labels, const Mat& _init_theta);
     void compute_gradient(const Mat& _data, const Mat& _labels, const Mat &_theta, const double _lambda, Mat & _gradient );
-    Mat batch_gradient_descent(const Mat& _data, const Mat& _labels, const Mat& _init_theta);
-    Mat mini_batch_gradient_descent(const Mat& _data, const Mat& _labels, const Mat& _init_theta);
+    Mat batch_gradient_descent(const Mat& _data, const Mat& _labels, const Mat& _init_theta, const Mat& _data_val, const Mat& _labels_val, Mat2f perf);
+    Mat mini_batch_gradient_descent(const Mat& _data, const Mat& _labels, const Mat& _init_theta, const Mat& _data_val, const Mat& _labels_val, Mat2f perf);
     bool set_label_map(const Mat& _labels_i);
-    Mat remap_labels(const Mat& _labels_i, const map<int, int>& lmap) const;
+    void remap_labels(Mat& labels_i, const map<int, int>& lmap) const;
 protected:
     LrParams params;
     Mat learnt_thetas;
+    Mat2f training_perf;
     map<int, int> forward_mapper;
     map<int, int> reverse_mapper;
     Mat labels_o;
@@ -133,8 +153,18 @@ bool LogisticRegressionImpl::train(const Ptr<TrainData>& trainData, int)
     bool ok = false;
 
     clear();
-    Mat _data_i = trainData->getSamples();
-    Mat _labels_i = trainData->getResponses();
+    Mat _data_i = trainData->getTrainSamples();
+    Mat _labels_i = trainData->getTrainResponses();
+
+    Mat _data_val, _labels_val;
+    if ( params.test_data_is_validation &&
+            trainData->getNTestSamples() > 0 &&
+            params.train_method == LogisticRegression::MINI_BATCH &&
+            params.max_iters_no_improvement > 0 )
+    {
+        _data_val = trainData->getTestSamples();
+        _labels_val = trainData->getTestResponses();
+    }
 
     // check size and type of training data
     CV_Assert( !_labels_i.empty() && !_data_i.empty());
@@ -153,12 +183,18 @@ bool LogisticRegressionImpl::train(const Ptr<TrainData>& trainData, int)
 
     // class labels
     set_label_map(_labels_i);
-    Mat labels_l = remap_labels(_labels_i, this->forward_mapper);
+    Mat labels_l;
+    _labels_i.convertTo(labels_l, CV_32S);
+    remap_labels(labels_l, this->forward_mapper);
+
     int num_classes = (int) this->forward_mapper.size();
     if(num_classes < 2)
     {
-        CV_Error( CV_StsBadArg, "data should have atleast 2 classes" );
+        CV_Error( CV_StsBadArg, "data should have at least 2 classes" );
     }
+
+    int num_perf_iters = max(params.num_iters, params.term_crit.maxCount) / params.record_train_freq;
+    training_perf = Mat2f::zeros(2 + num_perf_iters, num_classes == 2 ? 1 : num_classes);
 
     // add a column of ones to the data (bias/intercept term)
     Mat data_t;
@@ -168,16 +204,17 @@ bool LogisticRegressionImpl::train(const Ptr<TrainData>& trainData, int)
     Mat thetas;
     Mat init_theta = Mat::zeros(data_t.cols, 1, CV_32F);
 
-    // fit the model (handles binary and multiclass cases)
     Mat new_theta;
-    Mat labels;
+    Mat labels, labels_val;
+
+    // fit the model (handles binary and multiclass cases)
     if(num_classes == 2)
     {
         labels_l.convertTo(labels, CV_32F);
         if(this->params.train_method == LogisticRegression::BATCH)
-            new_theta = batch_gradient_descent(data_t, labels, init_theta);
+            new_theta = batch_gradient_descent(data_t, labels, init_theta, _data_val, _labels_val, training_perf);
         else
-            new_theta = mini_batch_gradient_descent(data_t, labels, init_theta);
+            new_theta = mini_batch_gradient_descent(data_t, labels, init_theta, _data_val, _labels_val, training_perf);
         thetas = new_theta.t();
     }
     else
@@ -185,20 +222,31 @@ bool LogisticRegressionImpl::train(const Ptr<TrainData>& trainData, int)
         /* take each class and rename classes you will get a theta per class
         as in multi class class scenario, we will have n thetas for n classes */
         thetas.create(num_classes, data_t.cols, CV_32F);
-        Mat labels_binary;
+
+//        Mat new_theta;
+        Mat labels_binary, labels_bin_val;
+//        Mat labels, labels_val;
         int ii = 0;
         for(map<int,int>::iterator it = this->forward_mapper.begin(); it != this->forward_mapper.end(); ++it)
         {
             // one-vs-rest (OvR) scheme
             labels_binary = (labels_l == it->second)/255;
             labels_binary.convertTo(labels, CV_32F);
-            if(this->params.train_method == LogisticRegression::BATCH)
-                new_theta = batch_gradient_descent(data_t, labels, init_theta);
+
+            labels_bin_val = (_labels_val == it->second)/255;
+            labels_bin_val.convertTo(labels_val, CV_32S);
+
+            if( params.train_method == BATCH)
+                new_theta = batch_gradient_descent(data_t, labels, init_theta, _data_val, labels_val, training_perf.col(ii));
             else
-                new_theta = mini_batch_gradient_descent(data_t, labels, init_theta);
-            hconcat(new_theta.t(), thetas.row(ii));
+                new_theta = mini_batch_gradient_descent(data_t, labels, init_theta, _data_val, labels_val, training_perf.col(ii));
+            thetas.row(ii) = new_theta.t();
+//            hconcat(new_theta.t(), thetas.row(ii));
             ii += 1;
         }
+
+//        train_multiclass( data_t, labels_l, _data_val, _labels_val,
+//                thetas, init_theta, params.train_parallel );
     }
 
     // check that the estimates are stable and finite
@@ -213,6 +261,32 @@ bool LogisticRegressionImpl::train(const Ptr<TrainData>& trainData, int)
     return ok;
 }
 
+//void LogisticRegressionImpl::train_multiclass( const Mat & data_t,
+//        const Mat & labels_l, const Mat & _data_val, const Mat & _labels_val,
+//        const Mat & thetas, const Mat & init_theta, bool parallelize ) {
+//    Mat new_theta;
+//    Mat labels_binary, labels_bin_val;
+//    Mat labels, labels_val;
+//    int ii = 0;
+//    for(map<int,int>::iterator it = this->forward_mapper.begin(); it != this->forward_mapper.end(); ++it)
+//    {
+//        // one-vs-rest (OvR) scheme
+//        labels_binary = (labels_l == it->second)/255;
+//        labels_binary.convertTo(labels, CV_32F);
+//
+//        labels_bin_val = (_labels_val == it->second)/255;
+//        labels_bin_val.convertTo(labels_val, CV_32S);
+//
+//        if( params.train_method == BATCH)
+//            new_theta = batch_gradient_descent(data_t, labels, init_theta, _data_val, labels_val, training_perf.col(ii));
+//        else
+//            new_theta = mini_batch_gradient_descent(data_t, labels, init_theta, _data_val, labels_val, training_perf.col(ii));
+//        thetas.row(ii) = new_theta.t();
+////            hconcat(new_theta.t(), thetas.row(ii));
+//        ii += 1;
+//    }
+//}
+
 float LogisticRegressionImpl::predict(InputArray samples, OutputArray results, int flags) const
 {
     // check if learnt_mats array is populated
@@ -221,15 +295,22 @@ float LogisticRegressionImpl::predict(InputArray samples, OutputArray results, i
         CV_Error( CV_StsBadArg, "classifier should be trained first" );
     }
 
+    return compute_prediction( samples, learnt_thetas, results, flags );
+}
+
+
+float LogisticRegressionImpl::compute_prediction(InputArray samples,
+        const Mat& _thetas, OutputArray results, int flags ) const
+{
     // coefficient matrix
     Mat thetas;
-    if ( learnt_thetas.type() == CV_32F )
+    if ( _thetas.type() == CV_32F )
     {
-        thetas = learnt_thetas;
+        thetas = _thetas;
     }
     else
     {
-        this->learnt_thetas.convertTo( thetas, CV_32F );
+        _thetas.convertTo( thetas, CV_32F );
     }
     CV_Assert(thetas.rows > 0);
 
@@ -243,16 +324,21 @@ float LogisticRegressionImpl::predict(InputArray samples, OutputArray results, i
     // add a column of ones to the data (bias/intercept term)
     Mat data_t;
     hconcat( cv::Mat::ones( data.rows, 1, CV_32F ), data, data_t );
+//    Mat data_t = data;
     CV_Assert(data_t.cols == thetas.cols);
+//    CV_Assert(data_t.cols+1 == thetas.cols);
 
     // predict class labels for samples (handles binary and multiclass cases)
-    Mat labels_c;
+    Mat labels_c(data_t.rows, 1, CV_32S);
     Mat pred_m;
     Mat temp_pred;
     if(thetas.rows == 1)
     {
         // apply sigmoid function
-        temp_pred = calc_sigmoid(data_t * thetas.t());
+//        temp_pred = calc_sigmoid(data_t * thetas.t());
+        temp_pred = calc_sigmoid(data * thetas.colRange(1, thetas.cols).t() +
+                thetas.at< float >( 0, 0 ) );
+
         CV_Assert(temp_pred.cols==1);
         pred_m = temp_pred.clone();
 
@@ -266,25 +352,27 @@ float LogisticRegressionImpl::predict(InputArray samples, OutputArray results, i
         pred_m.create(data_t.rows, thetas.rows, data.type());
         for(int i = 0; i < thetas.rows; i++)
         {
-            temp_pred = calc_sigmoid(data_t * thetas.row(i).t());
+//            temp_pred = calc_sigmoid(data_t * thetas.row(i).t());
+            temp_pred = calc_sigmoid(data * thetas.row(i).colRange(1, thetas.cols).t() +
+                    thetas.row(i).at< float >( 0, 0 ) );
+
             vconcat(temp_pred, pred_m.col(i));
         }
 
         // predict class with the maximum output
         Point max_loc;
-        Mat labels;
         for(int i = 0; i < pred_m.rows; i++)
         {
             temp_pred = pred_m.row(i);
             minMaxLoc( temp_pred, NULL, NULL, NULL, &max_loc );
-            labels.push_back(max_loc.x);
+            labels_c.at< int >(i, 0) = max_loc.x;
+//            labels.push_back(max_loc.x);
         }
-        labels.convertTo(labels_c, CV_32S);
     }
 
     // return label of the predicted class. class names can be 1,2,3,...
-    Mat pred_labs = remap_labels(labels_c, this->reverse_mapper);
-    pred_labs.convertTo(pred_labs, CV_32S);
+    remap_labels(labels_c, this->reverse_mapper);
+//    pred_labs.convertTo(pred_labs, CV_32S);
 
     // return either the labels or the raw output
     if ( results.needed() )
@@ -295,12 +383,13 @@ float LogisticRegressionImpl::predict(InputArray samples, OutputArray results, i
         }
         else
         {
-            pred_labs.copyTo(results);
+            labels_c.copyTo(results);
         }
     }
 
-    return ( pred_labs.empty() ? 0.f : static_cast<float>(pred_labs.at<int>(0)) );
+    return ( labels_c.empty() ? 0.f : static_cast<float>(labels_c.at<int>(0)) );
 }
+
 
 Mat LogisticRegressionImpl::calc_sigmoid(const Mat& data) const
 {
@@ -389,7 +478,7 @@ void LogisticRegressionImpl::compute_gradient(const Mat& _data, const Mat& _labe
 }
 
 
-Mat LogisticRegressionImpl::batch_gradient_descent(const Mat& _data, const Mat& _labels, const Mat& _init_theta)
+Mat LogisticRegressionImpl::batch_gradient_descent(const Mat& _data, const Mat& _labels, const Mat& _init_theta, const Mat& _data_val, const Mat& _labels_val, Mat2f perf)
 {
     // implements batch gradient descent
     if(this->params.alpha<=0)
@@ -402,30 +491,62 @@ Mat LogisticRegressionImpl::batch_gradient_descent(const Mat& _data, const Mat& 
         CV_Error( CV_StsBadArg, "number of iterations cannot be zero or a negative number" );
     }
 
+    CV_Assert(perf.rows >= params.num_iters && perf.cols >= 1);
+
     int llambda = 0;
     int m;
     Mat theta_p = _init_theta.clone();
     Mat gradient( theta_p.rows, theta_p.cols, theta_p.type() );
     m = _data.rows;
 
+    Mat pred_res, theta_best;
+    float acc = 0.0, best_acc = -1.0;
+    double cost = 0.0;
+    int no_improve_count = 0;
+
     if (params.norm != REG_DISABLE)
     {
         llambda = 1;
     }
 
-    for(int i = 0;i<this->params.num_iters;i++)
+    int last_recorded = 0;
+    for(int i = 0; ; i++)
     {
-        // this seems to only be called to ensure that cost is not NaN
-        compute_cost(_data, _labels, theta_p);
+        cost = compute_cost(_data, _labels, theta_p);
+
+        // compute accuracy on the validation set and halt training if converged
+        if ( !_data_val.empty() ) {
+            compute_prediction( _data_val, theta_p, pred_res, 0 );
+            acc = 1.0f - ( countNonZero( pred_res - _labels_val ) / _labels_val.total() );
+            if ( acc > ( best_acc + 1e-2 ) ) {
+                no_improve_count = 0;
+                best_acc = acc;
+                theta_p.copyTo( theta_best );
+            } else if ( ++no_improve_count > this->params.max_iters_no_improvement ) {
+                break;
+            }
+        }
+
+        if ( i % params.record_train_freq == 0 ) {
+            last_recorded = i / params.record_train_freq;
+            perf( last_recorded, 0 )[0] = cost;
+            perf( last_recorded, 0 )[1] = acc;
+        }
+
+        if ( i >= this->params.num_iters ) break;
 
         compute_gradient( _data, _labels, theta_p, llambda, gradient );
 
         theta_p = theta_p - ( static_cast<double>(this->params.alpha)/m)*gradient;
     }
-    return theta_p;
+
+    perf( last_recorded+1, 0 )[0] = cost;
+    perf( last_recorded+1, 0 )[1] = acc;
+
+    return theta_best;
 }
 
-Mat LogisticRegressionImpl::mini_batch_gradient_descent(const Mat& _data, const Mat& _labels, const Mat& _init_theta)
+Mat LogisticRegressionImpl::mini_batch_gradient_descent(const Mat& _data, const Mat& _labels, const Mat& _init_theta, const Mat& _data_val, const Mat& _labels_val, Mat2f perf)
 {
     // implements batch gradient descent
     int lambda_l = 0;
@@ -443,19 +564,38 @@ Mat LogisticRegressionImpl::mini_batch_gradient_descent(const Mat& _data, const 
         CV_Error( CV_StsBadArg, "number of iterations cannot be zero or a negative number" );
     }
 
+    CV_Assert( perf.cols == 1 );
+
     Mat theta_p = _init_theta.clone();
     Mat gradient( theta_p.rows, theta_p.cols, theta_p.type() );
     Mat data_d;
     Mat labels_l;
+
+    Mat pred_res, theta_best;
+    float acc = 0.0, best_acc = 0.0;
+    double cost = 0.0;
+    int no_improve_count = 0;
+    int max_NI_iters = this->params.max_iters_no_improvement;
 
     if (params.norm != REG_DISABLE)
     {
         lambda_l = 1;
     }
 
-    for(int i = 0;i<this->params.term_crit.maxCount;i++)
+    // compute the initial validation set accuracy
+    if ( !_data_val.empty() ) {
+        compute_prediction( _data_val, theta_p.t(), pred_res, 0 );
+        acc = 1.0f - ( (float) countNonZero( pred_res - _labels_val ) ) /
+                ( (float) _labels_val.total() );
+        best_acc = acc;
+    }
+
+    double alpha = static_cast<double>(this->params.alpha);
+
+    int last_recorded = 0;
+    for(int i = 0; ;i++)
     {
-        if(j+size_b<=_data.rows)
+        if(j + size_b <= _data.rows)
         {
             data_d = _data(Range(j,j+size_b), Range::all());
             labels_l = _labels(Range(j,j+size_b),Range::all());
@@ -468,21 +608,58 @@ Mat LogisticRegressionImpl::mini_batch_gradient_descent(const Mat& _data, const 
 
         m = data_d.rows;
 
-        // this seems to only be called to ensure that cost is not NaN
-        compute_cost(data_d, labels_l, theta_p);
+        if ( ( i % params.record_train_freq ) == 0 ) {
+            cost = compute_cost(data_d, labels_l, theta_p);
+            last_recorded = i / params.record_train_freq;
+            perf( last_recorded, 0 )[0] = cost;
+            perf( last_recorded, 0 )[1] = acc;
+        }
+
+        if ( i >= this->params.term_crit.maxCount ) break;
 
         compute_gradient(data_d, labels_l, theta_p, lambda_l, gradient);
 
-        theta_p = theta_p - ( static_cast<double>(this->params.alpha)/m)*gradient;
+        theta_p = theta_p - (alpha / m)*gradient;
 
         j += this->params.mini_batch_size;
 
-        // if parsed through all data variables
+        // if iterated through all training data rows
         if (j >= _data.rows) {
             j = 0;
+
+            // compute accuracy on the validation set and halt training if converged
+            if ( !_data_val.empty() ) {
+                compute_prediction( _data_val, theta_p.t(), pred_res, 0 );
+                acc = 1.0f - ( (float) countNonZero( pred_res - _labels_val ) ) /
+                        ( (float) _labels_val.total() );
+                if ( acc >= ( best_acc + 1e-2 ) ) {
+                    best_acc = acc;
+                    no_improve_count = 0;
+                    theta_p.copyTo( theta_best );
+                } else {
+                    ++no_improve_count;
+                    if ( params.decrease_alpha && no_improve_count == max_NI_iters / 2 ) {
+                        alpha /= 2.0;
+                        std::cout << "LR (mini batch) reducing learning rate to " << alpha << " after " << i << " iterations" << endl;
+                    }
+                    if ( no_improve_count > max_NI_iters ) {
+                        std::cout << "logistic regression (mini batch) stopping early after " << i << " iterations" << endl;
+                        break;
+                    }
+                }
+            }
         }
     }
-    return theta_p;
+
+    cost = compute_cost(data_d, labels_l, theta_p);
+    compute_prediction( _data_val, theta_p.t(), pred_res, 0 );
+    acc = 1.0f - ( (float) countNonZero( pred_res - _labels_val ) ) /
+            ( (float) _labels_val.total() );
+
+    perf( last_recorded+1, 0 )[0] = cost;
+    perf( last_recorded+1, 0 )[1] = acc;
+
+    return theta_best;
 }
 
 bool LogisticRegressionImpl::set_label_map(const Mat &_labels_i)
@@ -517,20 +694,15 @@ bool LogisticRegressionImpl::set_label_map(const Mat &_labels_i)
     return true;
 }
 
-Mat LogisticRegressionImpl::remap_labels(const Mat& _labels_i, const map<int, int>& lmap) const
+void LogisticRegressionImpl::remap_labels(Mat & labels_i, const map<int, int>& lmap) const
 {
-    Mat labels;
-    _labels_i.convertTo(labels, CV_32S);
-
-    Mat new_labels = Mat::zeros(labels.rows, labels.cols, labels.type());
-
+    CV_Assert( labels_i.type() == CV_32S );
     CV_Assert( !lmap.empty() );
 
-    for(int i =0;i<labels.rows;i++)
+    for(int i =0;i<labels_i.rows;i++)
     {
-        new_labels.at<int>(i,0) = lmap.find(labels.at<int>(i,0))->second;
+        labels_i.at<int>(i,0) = lmap.find(labels_i.at<int>(i,0))->second;
     }
-    return new_labels;
 }
 
 void LogisticRegressionImpl::clear()
@@ -547,7 +719,7 @@ void LogisticRegressionImpl::write(FileStorage& fs) const
     {
         CV_Error(CV_StsBadArg,"file can't open. Check file path");
     }
-    string desc = "Logisitic Regression Classifier";
+    string desc = "Logistic Regression Classifier";
     fs<<"classifier"<<desc.c_str();
     fs<<"alpha"<<this->params.alpha;
     fs<<"iterations"<<this->params.num_iters;
@@ -557,6 +729,8 @@ void LogisticRegressionImpl::write(FileStorage& fs) const
     {
         fs<<"mini_batch_size"<<this->params.mini_batch_size;
     }
+    fs<<"use_validation"<<this->params.test_data_is_validation;
+    fs<<"max_no_improve_iters"<<this->params.max_iters_no_improvement;
     fs<<"learnt_thetas"<<this->learnt_thetas;
     fs<<"n_labels"<<this->labels_n;
     fs<<"o_labels"<<this->labels_o;
@@ -579,6 +753,12 @@ void LogisticRegressionImpl::read(const FileNode& fn)
     {
         this->params.mini_batch_size = (int)fn["mini_batch_size"];
     }
+
+    if ( !fn["use_validation"].empty() )
+        fn["use_validation"] >> this->params.test_data_is_validation;
+
+    if ( !fn["max_no_improve_iters"].empty() )
+        fn["max_no_improve_iters"] >> this->params.max_iters_no_improvement;
 
     fn["learnt_thetas"] >> this->learnt_thetas;
     fn["o_labels"] >> this->labels_o;

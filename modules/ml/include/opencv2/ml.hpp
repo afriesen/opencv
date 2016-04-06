@@ -1463,6 +1463,30 @@ public:
     /** @copybrief getTermCriteria @see getTermCriteria */
     CV_WRAP virtual void setTermCriteria(TermCriteria val) = 0;
 
+    /** True to use the test data portion of the input training data as a
+     * validation set during training. This is used in conjunction with
+     * getMaxItersNoValidImprovement to perform early-stopping. */
+    /** @see setUseValidationData */
+    CV_WRAP virtual bool getUseValidationData() const = 0;
+    /** @copybrief getUseValidationData @see getUseValidationData */
+    CV_WRAP virtual void setUseValidationData(bool val) = 0;
+
+    /** The number of iterations of no accuracy improvement on the validation
+     * set after which to stop training (early-stopping). Only relevant if
+     * useValidationData is true. */
+    /** @see setMaxItersNoValidImprovement */
+    CV_WRAP virtual int getMaxItersNoValidImprovement() const = 0;
+    /** @copybrief getMaxItersNoValidImprovement @see getMaxItersNoValidImprovement */
+    CV_WRAP virtual void setMaxItersNoValidImprovement(int val) = 0;
+
+    /** True to record the performance of the classifier/regressor at each
+     * iteration of training. Records both the value of the loss function and
+     * the validation set accuracy (if useValidationData is true). */
+    /** @see setRecordTrainingPerf */
+    CV_WRAP virtual bool getRecordTrainingPerf() const = 0;
+    /** @copybrief getRecordTrainingPerf @see getRecordTrainingPerf */
+    CV_WRAP virtual void setRecordTrainingPerf(bool val) = 0;
+
     //! Regularization kinds
     enum RegKinds {
         REG_DISABLE = -1, //!< Regularization disabled
@@ -1485,12 +1509,17 @@ public:
      */
     CV_WRAP virtual float predict( InputArray samples, OutputArray results=noArray(), int flags=0 ) const = 0;
 
-    /** @brief This function returns the trained paramters arranged across rows.
+    /** @brief This function returns the trained parameters arranged across rows.
 
     For a two class classifcation problem, it returns a row matrix. It returns learnt paramters of
     the Logistic Regression as a matrix of type CV_32F.
      */
     CV_WRAP virtual Mat get_learnt_thetas() const = 0;
+
+    /** @brief This function returns the computed loss and validation set
+     * accuracy per iteration of training.
+     * @returns A Mat of type CV_32F of size num_training_iters x 2. */
+    CV_WRAP virtual Mat2f getTrainingPerf() const = 0;
 
     /** @brief Creates empty model.
 

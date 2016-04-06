@@ -197,8 +197,16 @@ void DTreesImpl::startTraining( const Ptr<TrainData>& data, int )
             }
         }
     }
-    else
+    else {
         data->getResponses().copyTo(w->ord_responses);
+    }
+
+    const int n_cv = params.getCVFolds();
+    if ( n_cv > 0 ) {
+        int nsamples = (int) w->cat_responses.size();
+        w->cv_labels.resize( nsamples );
+        randu( w->cv_labels, 0, n_cv );
+    }
 }
 
 
@@ -1548,6 +1556,7 @@ void DTreesImpl::writeTrainingParams(FileStorage& fs) const
 
 void DTreesImpl::writeParams(FileStorage& fs) const
 {
+    fs << "format" << (int) 3;
     fs << "is_classifier" << isClassifier();
     fs << "var_all" << (int)varType.size();
     fs << "var_count" << getVarCount();
