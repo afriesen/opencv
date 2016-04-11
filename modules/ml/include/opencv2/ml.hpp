@@ -1465,15 +1465,15 @@ public:
 
     /** True to use the test data portion of the input training data as a
      * validation set during training. This is used in conjunction with
-     * getMaxItersNoValidImprovement to perform early-stopping. */
+     * getMaxItersNoValidImprovement to perform early-stopping (default false). */
     /** @see setUseValidationData */
-    CV_WRAP virtual bool getUseValidationData() const = 0;
+    CV_WRAP virtual bool getUseValidationSet() const = 0;
     /** @copybrief getUseValidationData @see getUseValidationData */
-    CV_WRAP virtual void setUseValidationData(bool val) = 0;
+    CV_WRAP virtual void setUseValidationSet(bool val) = 0;
 
     /** The number of iterations of no accuracy improvement on the validation
      * set after which to stop training (early-stopping). Only relevant if
-     * useValidationData is true. */
+     * useValidationData is true. (default is 0, meaning off) */
     /** @see setMaxItersNoValidImprovement */
     CV_WRAP virtual int getMaxItersNoValidImprovement() const = 0;
     /** @copybrief getMaxItersNoValidImprovement @see getMaxItersNoValidImprovement */
@@ -1486,6 +1486,35 @@ public:
     CV_WRAP virtual bool getRecordTrainingPerf() const = 0;
     /** @copybrief getRecordTrainingPerf @see getRecordTrainingPerf */
     CV_WRAP virtual void setRecordTrainingPerf(bool val) = 0;
+
+    /** Record training performance when (iter % TrainingPerfRecordPeriod)==0 */
+    /** @see setTrainingPerfRecordPeriod */
+    CV_WRAP virtual int getTrainingPerfRecordPeriod() const = 0;
+    /** @copybrief getTrainingPerfRecordPeriod @see getTrainingPerfRecordPeriod */
+    CV_WRAP virtual void setTrainingPerfRecordPeriod(int val) = 0;
+
+//    /** True to compute gradient using parallelized operations during training.
+//     * (default is false) */
+//    /** @see setParallelTraining */
+//    CV_WRAP virtual bool getParallelTraining() const = 0;
+//    /** @copybrief getParallelTraining @see getParallelTraining */
+//    CV_WRAP virtual void setParallelTraining(bool val) = 0;
+
+    /** True to decrease the learning rate during training if there is no
+    * improvement on validation set accuracy (default false). */
+    /** @see setDecreaseAlpha */
+    CV_WRAP virtual bool getDecreaseAlpha() const = 0;
+    /** @copybrief getDecreaseAlpha @see getDecreaseAlpha */
+    CV_WRAP virtual void setDecreaseAlpha(bool val) = 0;
+
+    /** True to use 1 vs. all for multivariate logistic regression, otherwise
+     * will use multinomial (softmax) logistic regression formulation
+     * (default is true). */
+    /** @see setUseOneVsAll */
+    CV_WRAP virtual bool getUseOneVsAll() const = 0;
+    /** @copybrief getUseOneVsAll @see getUseOneVsAll */
+    CV_WRAP virtual void setUseOneVsAll(bool val) = 0;
+
 
     //! Regularization kinds
     enum RegKinds {

@@ -72,11 +72,11 @@ public:
         mini_batch_size = 1;
         term_crit = TermCriteria(TermCriteria::COUNT + TermCriteria::EPS, num_iters, alpha);
         test_data_is_validation = false;
-        max_iters_no_improvement = 20;
-        record_train_freq = 30;
-        train_parallel = true;
-        decrease_alpha = true;
-        useOneVsAll = false;
+        max_iters_no_improvement = 0;
+        record_train_period = 30;
+//        train_parallel = false;
+        decrease_alpha = false;
+        use_one_vs_all = true;
     }
 
     double alpha; //!< learning rate.
@@ -88,10 +88,10 @@ public:
     bool test_data_is_validation; //!< true to use the test portion of the input training data as a validation set
     int max_iters_no_improvement; //!< max number of iterations to keep training if there's no improvement on validation set accuracy
     bool record_training; //!< true to record the cost and validation accuracy (if computed) for each training iteration
-    int record_train_freq;
-    bool train_parallel;
-    bool decrease_alpha; // true to decrease the learning rate if no progress is being made relative to the validation set
-    bool useOneVsAll;
+    int record_train_period; //!< record training performance at when (iter % record_train_period)==0
+//    bool train_parallel; //!< true to parallelize gradient computations during training
+    bool decrease_alpha; //!< true to decrease the learning rate if no progress is being made relative to the validation set
+    bool use_one_vs_all; //!< true to use 1 vs all instead of multinomial logistic regression (i.e. softmax regression)
 };
 
 class LogisticRegressionImpl : public LogisticRegression
@@ -107,9 +107,13 @@ public:
     CV_IMPL_PROPERTY(int, TrainMethod, params.train_method)
     CV_IMPL_PROPERTY(int, MiniBatchSize, params.mini_batch_size)
     CV_IMPL_PROPERTY(TermCriteria, TermCriteria, params.term_crit)
-    CV_IMPL_PROPERTY(bool, UseValidationData, params.test_data_is_validation )
-    CV_IMPL_PROPERTY(int, MaxItersNoValidImprovement, params.max_iters_no_improvement )
-    CV_IMPL_PROPERTY(bool, RecordTrainingPerf, params.record_training )
+    CV_IMPL_PROPERTY(bool, UseValidationSet, params.test_data_is_validation)
+    CV_IMPL_PROPERTY(int, MaxItersNoValidImprovement, params.max_iters_no_improvement)
+    CV_IMPL_PROPERTY(bool, RecordTrainingPerf, params.record_training)
+    CV_IMPL_PROPERTY(int, TrainingPerfRecordPeriod, params.record_train_period)
+//    CV_IMPL_PROPERTY(bool, ParallelTraining, params.train_parallel)
+    CV_IMPL_PROPERTY(bool, DecreaseAlpha, params.decrease_alpha)
+    CV_IMPL_PROPERTY(bool, UseOneVsAll, params.use_one_vs_all)
 
     virtual bool train( const Ptr<TrainData>& trainData, int=0 );
     virtual float predict(InputArray samples, OutputArray results, int flags=0) const;
@@ -161,9 +165,7 @@ bool LogisticRegressionImpl::train(const Ptr<TrainData>& trainData, int)
     Mat _data_val, _labels_val;
     if ( params.test_data_is_validation
             && trainData->getNTestSamples() > 0
-//            && params.train_method == LogisticRegression::MINI_BATCH
-//            && params.max_iters_no_improvement > 0
-            )
+            /*&& params.max_iters_no_improvement > 0*/ )
     {
         _data_val = trainData->getTestSamples();
         _labels_val = trainData->getTestResponses();
@@ -199,11 +201,11 @@ bool LogisticRegressionImpl::train(const Ptr<TrainData>& trainData, int)
         CV_Error( CV_StsBadArg, "data should have at least 2 classes" );
     }
 
-    int num_perf_iters = max(params.num_iters, params.term_crit.maxCount) / params.record_train_freq;
+    int num_perf_iters = max(params.num_iters, params.term_crit.maxCount) / params.record_train_period;
 
     // add a column of ones to the data (bias/intercept term)
     Mat data_t;
-    hconcat( cv::Mat::ones( _data_i.rows, 1, CV_32F ), _data_i, data_t );
+    hconcat( _data_i, cv::Mat::ones( _data_i.rows, 1, CV_32F ), data_t );
 
     // coefficient matrix (zero-initialized)
     Mat thetas;
@@ -213,7 +215,7 @@ bool LogisticRegressionImpl::train(const Ptr<TrainData>& trainData, int)
     Mat labels, labels_val;
 
     // fit the model (handles binary and multiclass cases)
-    if(num_classes == 2 || !params.useOneVsAll)
+    if(num_classes == 2 || !params.use_one_vs_all)
     {
         thetas.create(num_classes-1, n, CV_32F);
         training_perf = Mat2f::zeros(2 + num_perf_iters, 1);
@@ -223,7 +225,7 @@ bool LogisticRegressionImpl::train(const Ptr<TrainData>& trainData, int)
 
         Mat ll;
         for(int ii = 0; ii < num_classes; ++ii) {
-            ll = (labels_l == forward_mapper[ii] ) / 255;
+            ll = (labels_l == ii ) / 255;
             ll.convertTo(labels.col(ii), CV_32F);
         }
 
@@ -233,7 +235,7 @@ bool LogisticRegressionImpl::train(const Ptr<TrainData>& trainData, int)
             new_theta = batch_gradient_descent(data_t, labels, init_theta, _data_val, labels_val, training_perf);
         else
             new_theta = mini_batch_gradient_descent(data_t, labels, init_theta, _data_val, labels_val, training_perf);
-        thetas = new_theta;//.t();
+        thetas = new_theta;
     }
     else
     {
@@ -248,18 +250,20 @@ bool LogisticRegressionImpl::train(const Ptr<TrainData>& trainData, int)
         for(map<int,int>::iterator it = this->forward_mapper.begin(); it != this->forward_mapper.end(); ++it)
         {
             // one-vs-rest (OvR) scheme
-            hconcat( (labels_l == it->second)/255, (labels_l != it->second)/255, labels_binary);
+            hconcat( (labels_l != it->second)/255, (labels_l == it->second)/255, labels_binary);
             labels_binary.convertTo(labels, CV_32F);
 
-            if ( !_labels_val.empty() )
-                labels_bin_val = (_labels_val == it->second)/255;
-            labels_bin_val.convertTo(labels_val, CV_32S);
+            if ( !_labels_val.empty() ) {
+                labels_val = Mat::zeros(_labels_val.rows, 1, CV_32S);
+                labels_val.setTo(reverse_mapper[1], _labels_val == it->first);
+                labels_val.setTo(reverse_mapper[0], _labels_val != it->first);
+            }
 
             if( params.train_method == BATCH)
                 new_theta = batch_gradient_descent(data_t, labels, init_theta, _data_val, labels_val, training_perf.col(ii));
             else
                 new_theta = mini_batch_gradient_descent(data_t, labels, init_theta, _data_val, labels_val, training_perf.col(ii));
-            thetas.row(ii) = new_theta;//.t();
+            new_theta.copyTo(thetas.row(ii));
             ii += 1;
         }
     }
@@ -320,48 +324,9 @@ float LogisticRegressionImpl::compute_prediction(InputArray samples,
     Mat pred_m;
     Mat temp_pred;
 
-    if(thetas.rows == 1 || !params.useOneVsAll)
+    if(thetas.rows == 1 || !params.use_one_vs_all)
     {
         compute_class_probabilities(data, thetas, pred_m);
-//        if ( _p_yc.empty() ) {
-//            compute_class_probabilities( data, thetas, pred_m );
-//        } else {
-//            Mat temp;
-//            compute_class_probabilities( data, thetas, temp );
-//            Mat diff = abs( temp - _p_yc );
-//            double max_diff;
-//            int maxidx[2];
-//            minMaxIdx( diff, nullptr, &max_diff, nullptr, maxidx );
-//            if ( max_diff > 1e-8 ) {
-//                cout << "max p_yc diff in compute_prediction is too large: " << max_diff << endl;
-//                int asdf = 0;
-//            }
-//            pred_m = _p_yc;
-//        }
-
-//        Mat z = data * thetas.colRange(0, lasttc).t();  // (MxN) x ((K-1)x((N+1)-1))^T = Mx(K-1)
-//        const Mat thlast = thetas.col(lasttc).t(); // ((K-1)x1)^T = 1x(K-1)
-//        add(z, repeat(thetas.col(lasttc).t(), z.rows, 1), z); // add the intercept terms
-////        for (int i = 0; i < z.rows; ++i) {
-////            z.row(i) += thlast;
-////        }
-//
-//        Mat sum_z;
-//        exp(z, z);
-//        reduce(z, sum_z, 1, REDUCE_SUM);
-//        divide(z, repeat(sum_z+1.0, 1, z.cols), pred_m);
-//        hconcat(pred_m, 1.0 / sum_z, pred_m);
-
-//        // apply sigmoid function
-//        temp_pred = calc_sigmoid(data * thetas.colRange(0, lasttc).t() +
-//                thetas.at< float >( 0, lasttc ) );
-//
-//        CV_Assert(temp_pred.cols==1);
-//        pred_m = temp_pred.clone();
-//
-//        // if greater than 0.5, predict class 0 or predict class 1
-//        temp_pred = (temp_pred > 0.5f) / 255;
-//        temp_pred.convertTo(labels_c, CV_32S);
     }
     else
     {
@@ -369,10 +334,10 @@ float LogisticRegressionImpl::compute_prediction(InputArray samples,
         pred_m.create(data.rows, thetas.rows, data.type());
         for(int i = 0; i < thetas.rows; i++)
         {
-            temp_pred = calc_sigmoid(data * thetas.row(i).colRange(0, lasttc).t() +
-                    thetas.row(i).at< float >( 0, lasttc ) );
-
-            vconcat(temp_pred, pred_m.col(i));
+//            temp_pred = calc_sigmoid(data * thetas.row(i).colRange(0, lasttc).t() +
+//                    thetas.at< float >( i, lasttc ) );
+            compute_class_probabilities(data, thetas.row(i), temp_pred);
+            temp_pred.col(1).copyTo(pred_m.col(i));
         }
     }
 
@@ -380,8 +345,7 @@ float LogisticRegressionImpl::compute_prediction(InputArray samples,
     Point max_loc;
     for(int i = 0; i < pred_m.rows; i++)
     {
-        temp_pred = pred_m.row(i);
-        minMaxLoc( temp_pred, NULL, NULL, NULL, &max_loc );
+        minMaxLoc( pred_m.row(i), NULL, NULL, NULL, &max_loc );
         labels_c.at< int >(i, 0) = max_loc.x;
     }
 
@@ -428,7 +392,9 @@ void LogisticRegressionImpl::compute_class_probabilities( const Mat & _data,
 
     const int m = _data.rows, K = _theta.rows+1;
     const int ones_idx = _theta.cols-1;
-    Mat z, sum_z;
+    Mat z, sum_z;//, maxvals;
+
+    p_yc.create(m, K, CV_32F);
 
     // implicitly add the intercept terms if they don't exist in the data
     if ( _data.cols < _theta.cols ) {
@@ -441,17 +407,25 @@ void LogisticRegressionImpl::compute_class_probabilities( const Mat & _data,
         z = _data * _theta.t();  // (MxN+1) x ((K-1)x(N+1))^T = Mx(K-1)
     }
 
+//    // subtract the largest element from each row to prevent overflow
+//    reduce(z, maxvals, 1, REDUCE_MAX);
+//    maxvals = max(maxvals, 0.0);
+//    for (int i = 0; i < z.cols; ++i ) z.col(i) -= maxvals;
+
+    // compute softmax
     exp(z, z);
     reduce(z, sum_z, 1, REDUCE_SUM);
     sum_z += 1.0;
 
-    p_yc.create(m, K, CV_32F);
+//    exp(-maxvals, maxvals);
+//    sum_z += maxvals;
 
-//    divide(z, repeat(sum_z+1.0, 1, z.cols), pred_m);
+    CV_Assert(z.cols == K-1);
+
+    p_yc.col(0) = 1.0 / sum_z; // add the column for the all-zero theta
     for (int i = 0; i < z.cols; ++i) {
-        divide(z.col(i), sum_z, p_yc.col(i));
+        divide(z.col(i), sum_z, p_yc.col(i+1));
     }
-    p_yc.col(K-1) = 1.0 / sum_z; // add the column for the all-zero theta
 }
 
 
@@ -463,13 +437,8 @@ double LogisticRegressionImpl::compute_cost(const Mat& _data, const Mat& _labels
     double rparameter = 0;
     Mat theta_b;
     Mat theta_c;
-//    Mat d_a;
-//    Mat d_b;
 
     m = _data.rows;
-//    n = _data.cols;
-
-//    theta_b = _theta(Range(1, n), Range::all());
     theta_b = _theta;
 
     if(this->params.norm == LogisticRegression::REG_L1)
@@ -484,45 +453,10 @@ double LogisticRegressionImpl::compute_cost(const Mat& _data, const Mat& _labels
         rparameter = (_lambda/(2*m)) * sum(theta_c)[0];
     }
 
-//    Mat d_a, d_b;
-//    Mat J_ij, sum_J, d_c;
-//    d_a = _data * _theta.t();
-//    exp(d_a, J_ij);
-//    reduce(J_ij, sum_J, 1, REDUCE_SUM);
-//    Mat logsumJ;
-//    log(sum_J + 1.0, logsumJ);
-//    // normalize and add in the zero'd out theta column
-//    multiply(_labels.colRange(0, _labels.cols-1), d_a - repeat(logsumJ, 1, d_a.cols), d_b);
-//    multiply(_labels.col(_labels.cols-1), -logsumJ, d_c );
-//    double cost2 = (-1.0 / m) * (sum(d_b)[0] + sum(d_c)[0]) + rparameter;
-
-//    Mat temp, logtemp;
-//    compute_class_probabilities( _data, _theta, temp );
-//    log(temp, logtemp);
-//    multiply(_labels, logtemp, logtemp);
-//    double cost3 = (-1.0 / m) * sum(logtemp)[0] + rparameter;
-//
-//    Mat diff = abs( temp - _p_yc );
-//    double max_diff;
-//    int maxidx[2];
-//    minMaxIdx( diff, nullptr, &max_diff, nullptr, maxidx );
-//    if ( max_diff > 1e-8 ) {
-//        cout << "max p_yc diff in compute_cost is too large: " << max_diff << endl;
-//        int asdf = 0;
-//    }
-
-
     Mat log_pyc;
     log(_p_yc, log_pyc);
     multiply(_labels, log_pyc, log_pyc);
     cost = (-1.0 / m) * sum(log_pyc)[0] + rparameter;
-
-//    if ( abs(cost-cost2) > 1e-6 || abs(cost-cost3) > 1e-6 ) {
-//        cout << "diff (c1-c2): " << cost-cost2 << " (" << cost << " vs. actual " << cost2 << ")" << endl;
-//        cout << "diff (c1-c3): " << cost-cost3 << " (" << cost << " vs. actual " << cost3 << ")" << endl;
-//        cout << "diff (c3-c2): " << cost3-cost2 << " (" << cost3 << " vs. actual " << cost2 << ")" << endl;
-//    }
-
 
     if(cvIsNaN( cost ) == 1)
     {
@@ -532,42 +466,42 @@ double LogisticRegressionImpl::compute_cost(const Mat& _data, const Mat& _labels
     return cost;
 }
 
-struct LogisticRegressionImpl_ComputeGradient_Impl : ParallelLoopBody
-{
-    const Mat* data;
-    const Mat* theta;
-    const Mat* pcal_a;
-    Mat* gradient;
-    double lambda;
-
-    LogisticRegressionImpl_ComputeGradient_Impl(const Mat& _data, const Mat &_theta, const Mat& _pcal_a, const double _lambda, Mat & _gradient)
-        : data(&_data)
-        , theta(&_theta)
-        , pcal_a(&_pcal_a)
-        , gradient(&_gradient)
-        , lambda(_lambda)
-    {
-
-    }
-
-    void operator()(const cv::Range& r) const
-    {
-        const Mat& _data  = *data;
-        const Mat &_theta = *theta;
-        Mat & _gradient   = *gradient;
-        const Mat & _pcal_a = *pcal_a;
-        const int m = _data.rows;
-        Mat pcal_ab;
-
-        for (int ii = r.start; ii<r.end; ii++)
-        {
-            Mat pcal_b = _data(Range::all(), Range(ii,ii+1));
-            multiply(_pcal_a, pcal_b, pcal_ab, 1);
-
-            _gradient.row(ii) = (1.0/m)*sum(pcal_ab)[0] + (lambda/m) * _theta.row(ii);
-        }
-    }
-};
+//struct LogisticRegressionImpl_ComputeGradient_Impl : ParallelLoopBody
+//{
+//    const Mat* data;
+//    const Mat* theta;
+//    const Mat* pcal_a;
+//    Mat* gradient;
+//    double lambda;
+//
+//    LogisticRegressionImpl_ComputeGradient_Impl(const Mat& _data, const Mat &_theta, const Mat& _pcal_a, const double _lambda, Mat & _gradient)
+//        : data(&_data)
+//        , theta(&_theta)
+//        , pcal_a(&_pcal_a)
+//        , gradient(&_gradient)
+//        , lambda(_lambda)
+//    {
+//
+//    }
+//
+//    void operator()(const cv::Range& r) const
+//    {
+//        const Mat& _data  = *data;
+//        const Mat &_theta = *theta;
+//        Mat & _gradient   = *gradient;
+//        const Mat & _pcal_a = *pcal_a;
+//        const int m = _data.rows;
+//        Mat pcal_ab;
+//
+//        for (int ii = r.start; ii<r.end; ii++)
+//        {
+//            Mat pcal_b = _data(Range::all(), Range(ii,ii+1));
+//            multiply(_pcal_a, pcal_b, pcal_ab, 1);
+//
+//            _gradient.row(ii) = (1.0/m)*sum(pcal_ab)[0] + (lambda/m) * _theta.row(ii);
+//        }
+//    }
+//};
 
 void LogisticRegressionImpl::compute_gradient(const Mat& _data, const Mat& _labels, const Mat &_theta, const Mat& _p_yc, const double _lambda, Mat & _gradient )
 {
@@ -588,23 +522,10 @@ void LogisticRegressionImpl::compute_gradient(const Mat& _data, const Mat& _labe
 //    LogisticRegressionImpl_ComputeGradient_Impl invoker(_data, _theta, pcal_a, _lambda, _gradient);
 //    cv::parallel_for_(cv::Range(1, _gradient.rows), invoker);
 
-
-//    Mat grad2(_gradient.rows, _gradient.cols, _gradient.type());
-//    const Mat z = _data * _theta.t();
-//    Mat L, sumL, p_yk;
-//    exp(z, L);
-//    reduce(L, sumL, 1, REDUCE_SUM);
-//    divide(L, repeat(sumL+1.0, 1, L.cols), p_yk);
-//    grad2/*_gradient*/ = (1.0/m) * ( p_yk - _labels.colRange(0, _labels.cols-1) ).t() * _data + (_lambda/m) * _theta;
-
-    // we assume that data has a column of ones included
+    // we assume that the data has a column of ones included, and we ignore the
+    // row of zeros in theta
     const int K = _p_yc.cols;
-    _gradient = (1.0/m) * ( _p_yc.colRange(0, K-1) - _labels.colRange(0, K-1) ).t() * _data + (_lambda/m)*_theta;
-
-//    double total_diff = sum(abs(grad2 - _gradient))[0];
-//    if ( total_diff > 1e-8 ) {
-//        cout << "grad diff: " << (grad2 - _gradient) << endl;
-//    }
+    _gradient = (1.0/m) * ( _p_yc.colRange(1, K) - _labels.colRange(1, K) ).t() * _data + (_lambda/m)*_theta;
 
 //    check_gradient(_gradient, _data, _labels, _theta, _lambda);
 }
@@ -655,11 +576,11 @@ Mat LogisticRegressionImpl::batch_gradient_descent(const Mat& _data, const Mat& 
         CV_Error( CV_StsBadArg, "number of iterations cannot be zero or a negative number" );
     }
 
-//    CV_Assert(perf.rows >= params.num_iters && perf.cols >= 1);
+    CV_Assert(perf.rows >= 1 + ( (float) params.num_iters) / params.record_train_period && perf.cols == 1);
 
     const double llambda = ( params.norm == REG_DISABLE ? 0 : 1 );
     int m;
-    double alpha = static_cast<double>(this->params.alpha);
+    double alpha = this->params.alpha;
     Mat theta_p = _init_theta.clone();
     Mat gradient( theta_p.rows, theta_p.cols, theta_p.type() );
     Mat p_yc;
@@ -668,10 +589,10 @@ Mat LogisticRegressionImpl::batch_gradient_descent(const Mat& _data, const Mat& 
     Mat pred_res, theta_best;
     float acc = 0.0, best_acc = -1.0;
     double cost = 0.0;
-    int no_improve_count = 0;
-    int last_recorded = 0;
+    int no_improve_count = 0, last_recorded = -1;
+    const int max_NI_iters = params.max_iters_no_improvement;
 
-    for(int i = 0; ; i++)
+    for(int i = 0; i < this->params.num_iters; i++)
     {
         compute_class_probabilities(_data, theta_p, p_yc);
         cost = compute_cost(_data, _labels, theta_p, p_yc, llambda);
@@ -679,22 +600,29 @@ Mat LogisticRegressionImpl::batch_gradient_descent(const Mat& _data, const Mat& 
         // compute accuracy on the validation set and halt training if converged
         if ( !_data_val.empty() ) {
             acc = compute_prediction_accuracy(_data_val, _labels_val, theta_p, pred_res);
-            if ( acc > ( best_acc + 1e-2 ) ) {
-                no_improve_count = 0;
-                best_acc = acc;
-                theta_p.copyTo( theta_best );
-            } else if ( ++no_improve_count > this->params.max_iters_no_improvement ) {
-                break;
+            if ( !params.use_one_vs_all ) {
+                if ( acc >= best_acc ) {
+                    best_acc = acc;
+                    no_improve_count = 0;
+                    theta_p.copyTo( theta_best );
+                } else {
+                    ++no_improve_count;
+                    if ( params.decrease_alpha &&
+                            (( no_improve_count % ( max_NI_iters / 4 )) == 0 )) {
+                        alpha /= 2.0;
+                    }
+                    if ( max_NI_iters > 0 && no_improve_count > max_NI_iters ) {
+                        break;
+                    }
+                }
             }
         }
 
-        if ( i % params.record_train_freq == 0 ) {
-            last_recorded = i / params.record_train_freq;
+        if ( i % params.record_train_period == 0 ) {
+            last_recorded = i / params.record_train_period;
             perf( last_recorded, 0 )[0] = cost;
             perf( last_recorded, 0 )[1] = acc;
         }
-
-        if ( i >= this->params.num_iters ) break;
 
         compute_gradient( _data, _labels, theta_p, p_yc, llambda, gradient );
 
@@ -736,19 +664,20 @@ Mat LogisticRegressionImpl::mini_batch_gradient_descent(const Mat& _data, const 
     Mat pred_res, theta_best;
     float acc = 0.0f, best_acc = -1.0f;
     double cost = 0.0;
-    int no_improve_count = 0;
-    int max_NI_iters = this->params.max_iters_no_improvement;
+    int no_improve_count = 0, last_recorded = -1;
+    const int max_NI_iters = this->params.max_iters_no_improvement;
 
     if (params.norm != REG_DISABLE)
     {
         lambda_l = 1;
     }
 
-    double alpha = static_cast<double>(this->params.alpha);
-    acc = compute_prediction_accuracy(_data_val, _labels_val, theta_p, pred_res);
+    double alpha = this->params.alpha;
+    if ( !_data_val.empty() ) {
+        acc = compute_prediction_accuracy( _data_val, _labels_val, theta_p, pred_res );
+    }
 
-    int last_recorded = -1;
-    for(int i = 0; i < this->params.term_crit.maxCount; i++)
+    for(int i = 0; i < this->params.num_iters; i++)
     {
         if(j + size_b <= _data.rows)
         {
@@ -765,21 +694,37 @@ Mat LogisticRegressionImpl::mini_batch_gradient_descent(const Mat& _data, const 
 
         compute_class_probabilities(data_d, theta_p, p_yc);
 
-        if ( ( i % params.record_train_freq ) == 0 ) {
+        if ( ( i % params.record_train_period ) == 0 ) {
             cost = compute_cost(data_d, labels_l, theta_p, p_yc, lambda_l);
-            last_recorded = i / params.record_train_freq;
+
+            // compute accuracy on the validation set and halt training if converged
+            if ( !_data_val.empty() ) {
+                acc = compute_prediction_accuracy(_data_val, _labels_val, theta_p, pred_res);
+                if ( !params.use_one_vs_all ) {
+                    if ( acc >= best_acc ) {
+                        best_acc = acc;
+                        no_improve_count = 0;
+                        theta_p.copyTo( theta_best );
+                    } else {
+                        ++no_improve_count;
+                        if ( params.decrease_alpha &&
+                                (( no_improve_count % ( max_NI_iters/4 )) == 0 )) {
+                            alpha /= 2.0;
+                        }
+                        if ( max_NI_iters > 0 &&
+                                no_improve_count > max_NI_iters ) {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            last_recorded = i / params.record_train_period;
             perf( last_recorded, 0 )[0] = cost;
             perf( last_recorded, 0 )[1] = acc;
         }
 
         compute_gradient(data_d, labels_l, theta_p, p_yc, lambda_l, gradient);
-
-        if( cvIsNaN( (double)sum(theta_p - (alpha / m)*gradient)[0] ) ) {
-            cout << "theta: " << theta_p << endl;
-            cout << "grad: " << gradient << endl;
-            cout << "alpha: " << alpha << endl;
-        }
-
         theta_p = theta_p - (alpha / m)*gradient;
 
         j += this->params.mini_batch_size;
@@ -787,32 +732,15 @@ Mat LogisticRegressionImpl::mini_batch_gradient_descent(const Mat& _data, const 
         // if iterated through all training data rows
         if (j >= _data.rows) {
             j = 0;
-
-            // compute accuracy on the validation set and halt training if converged
-            if ( !_data_val.empty() ) {
-                acc = compute_prediction_accuracy(_data_val, _labels_val, theta_p, pred_res);
-                if ( acc > best_acc + 1e-8 ) {
-                    best_acc = acc;
-                    no_improve_count = 0;
-                    theta_p.copyTo( theta_best );
-                } else {
-                    ++no_improve_count;
-                    if ( params.decrease_alpha && ( ( no_improve_count % (max_NI_iters / 4) ) == 0 ) ) {
-                        alpha /= 2.0;
-                        std::cout << "LR (mini batch) reducing learning rate to " << alpha << " after " << i << " iterations" << endl;
-                    }
-                    if ( no_improve_count > max_NI_iters ) {
-                        std::cout << "logistic regression (mini batch) stopping early after " << i << " iterations" << endl;
-                        break;
-                    }
-                }
-            }
         }
     }
 
     compute_class_probabilities(data_d, theta_p, p_yc);
     cost = compute_cost(data_d, labels_l, theta_p, p_yc, lambda_l);
-    acc = compute_prediction_accuracy(_data_val, _labels_val, theta_p, pred_res);
+    if ( !_data_val.empty() ) {
+        acc = compute_prediction_accuracy( _data_val, _labels_val, theta_p,
+                pred_res );
+    }
 
     perf( last_recorded+1, 0 )[0] = cost;
     perf( last_recorded+1, 0 )[1] = acc;
@@ -887,7 +815,7 @@ void LogisticRegressionImpl::write(FileStorage& fs) const
         fs<<"mini_batch_size"<<this->params.mini_batch_size;
     fs<<"use_validation"<<this->params.test_data_is_validation;
     fs<<"max_no_improve_iters"<<this->params.max_iters_no_improvement;
-    fs<<"use_one_vs_all"<<this->params.useOneVsAll;
+    fs<<"use_one_vs_all"<<this->params.use_one_vs_all;
 
     fs<<"learnt_thetas"<<this->learnt_thetas;
     fs<<"n_labels"<<this->labels_n;
@@ -915,7 +843,7 @@ void LogisticRegressionImpl::read(const FileNode& fn)
         fn["max_no_improve_iters"] >> this->params.max_iters_no_improvement;
 
     if (!fn["use_one_vs_all"].empty())
-        fn["use_one_vs_all"] >> this->params.useOneVsAll;
+        fn["use_one_vs_all"] >> this->params.use_one_vs_all;
 
     fn["learnt_thetas"] >> this->learnt_thetas;
     fn["o_labels"] >> this->labels_o;
