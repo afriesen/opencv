@@ -317,7 +317,6 @@ float LogisticRegressionImpl::compute_prediction(InputArray samples,
 
     // implicitly add a column of ones to the end of the data (bias/intercept term)
     CV_Assert(data.cols+1 == thetas.cols);
-    const int lasttc = thetas.cols - 1;
 
     // predict class labels for samples (handles binary and multiclass cases)
     Mat labels_c(data.rows, 1, CV_32S);
@@ -451,7 +450,7 @@ void LogisticRegressionImpl::compute_class_probabilities( const Mat & _data,
     LogisticRegressionImpl_ComputeClassProbs_Impl ccpi(_data, _theta, p_yc);
 
     if ( params.train_parallel ) {
-        double nstripes = min(cv::getNumThreads(), cv::getNumberOfCPUs());
+        double nstripes = cv::getNumThreads();
         cv::parallel_for_(cv::Range(0, _data.rows), ccpi, nstripes);
     } else {
         ccpi(cv::Range(0, _data.rows));
@@ -533,7 +532,7 @@ void LogisticRegressionImpl::check_gradient(const Mat& _gradient, const Mat& _da
     Mat diff = _gradient - g;
     int maxidx[] = {-1,-1};
     double maxval = 10000;
-    minMaxIdx(diff, nullptr, &maxval, nullptr, maxidx);
+    minMaxIdx(diff, NULL, &maxval, NULL, maxidx);
     if ( maxval >= 1e-3 ) {
 //        cout << "diff: " << diff << endl;
         cout << "gradient difference detected: " << endl;
