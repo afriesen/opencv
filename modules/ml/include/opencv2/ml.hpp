@@ -1493,12 +1493,13 @@ public:
     /** @copybrief getTrainingPerfRecordPeriod @see getTrainingPerfRecordPeriod */
     CV_WRAP virtual void setTrainingPerfRecordPeriod(int val) = 0;
 
-//    /** True to compute gradient using parallelized operations during training.
-//     * (default is false) */
-//    /** @see setParallelTraining */
-//    CV_WRAP virtual bool getParallelTraining() const = 0;
-//    /** @copybrief getParallelTraining @see getParallelTraining */
-//    CV_WRAP virtual void setParallelTraining(bool val) = 0;
+    /** True to parallelize some operations during training (only beneficial for
+     * large training data; can be slower with small training data).
+     * (default is false) */
+    /** @see setParallelTraining */
+    CV_WRAP virtual bool getParallelizeTraining() const = 0;
+    /** @copybrief getParallelTraining @see getParallelTraining */
+    CV_WRAP virtual void setParallelizeTraining(bool val) = 0;
 
     /** True to decrease the learning rate during training if there is no
     * improvement on validation set accuracy (default false). */
@@ -1511,9 +1512,9 @@ public:
      * will use multinomial (softmax) logistic regression formulation
      * (default is true). */
     /** @see setUseOneVsAll */
-    CV_WRAP virtual bool getUseOneVsAll() const = 0;
+    CV_WRAP virtual bool getOneVsAll() const = 0;
     /** @copybrief getUseOneVsAll @see getUseOneVsAll */
-    CV_WRAP virtual void setUseOneVsAll(bool val) = 0;
+    CV_WRAP virtual void setOneVsAll(bool val) = 0;
 
 
     //! Regularization kinds
@@ -1548,7 +1549,7 @@ public:
     /** @brief This function returns the computed loss and validation set
      * accuracy per iteration of training.
      * @returns A Mat of type CV_32F of size num_training_iters x 2. */
-    CV_WRAP virtual Mat2f getTrainingPerf() const = 0;
+    CV_WRAP virtual Mat2f get_training_perf() const = 0;
 
     /** @brief Creates empty model.
 

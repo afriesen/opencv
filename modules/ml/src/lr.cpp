@@ -73,8 +73,8 @@ public:
         term_crit = TermCriteria(TermCriteria::COUNT + TermCriteria::EPS, num_iters, alpha);
         test_data_is_validation = false;
         max_iters_no_improvement = 0;
-        record_train_period = 30;
-//        train_parallel = false;
+        record_train_period = 300;
+        train_parallel = false;
         decrease_alpha = false;
         use_one_vs_all = true;
     }
@@ -89,7 +89,7 @@ public:
     int max_iters_no_improvement; //!< max number of iterations to keep training if there's no improvement on validation set accuracy
     bool record_training; //!< true to record the cost and validation accuracy (if computed) for each training iteration
     int record_train_period; //!< record training performance at when (iter % record_train_period)==0
-//    bool train_parallel; //!< true to parallelize gradient computations during training
+    bool train_parallel; //!< true to parallelize some computations during training (only beneficial with large training data)
     bool decrease_alpha; //!< true to decrease the learning rate if no progress is being made relative to the validation set
     bool use_one_vs_all; //!< true to use 1 vs all instead of multinomial logistic regression (i.e. softmax regression)
 };
@@ -111,9 +111,9 @@ public:
     CV_IMPL_PROPERTY(int, MaxItersNoValidImprovement, params.max_iters_no_improvement)
     CV_IMPL_PROPERTY(bool, RecordTrainingPerf, params.record_training)
     CV_IMPL_PROPERTY(int, TrainingPerfRecordPeriod, params.record_train_period)
-//    CV_IMPL_PROPERTY(bool, ParallelTraining, params.train_parallel)
+    CV_IMPL_PROPERTY(bool, ParallelizeTraining, params.train_parallel)
     CV_IMPL_PROPERTY(bool, DecreaseAlpha, params.decrease_alpha)
-    CV_IMPL_PROPERTY(bool, UseOneVsAll, params.use_one_vs_all)
+    CV_IMPL_PROPERTY(bool, OneVsAll, params.use_one_vs_all)
 
     virtual bool train( const Ptr<TrainData>& trainData, int=0 );
     virtual float predict(InputArray samples, OutputArray results, int flags=0) const;
@@ -121,7 +121,7 @@ public:
     virtual void write(FileStorage& fs) const;
     virtual void read(const FileNode& fn);
     virtual Mat get_learnt_thetas() const { return learnt_thetas; }
-    virtual Mat2f getTrainingPerf() const { return training_perf; }
+    virtual Mat2f get_training_perf() const { return training_perf; }
     virtual int getVarCount() const { return learnt_thetas.cols; }
     virtual bool isTrained() const { return !learnt_thetas.empty(); }
     virtual bool isClassifier() const { return true; }
@@ -385,46 +385,76 @@ Mat LogisticRegressionImpl::calc_sigmoid(const Mat& data) const
 }
 
 
-void LogisticRegressionImpl::compute_class_probabilities( const Mat & _data,
-        const Mat & _theta, Mat & p_yc ) const {
+struct LogisticRegressionImpl_ComputeClassProbs_Impl : ParallelLoopBody
+{
+    const Mat& data;
+    const Mat& theta;
+    Mat& p_yc;
 
-    CV_Assert( _data.cols+1 == _theta.cols || _data.cols == _theta.cols );
+    LogisticRegressionImpl_ComputeClassProbs_Impl(const Mat& _data, const Mat &_theta, Mat & _p_yc)
+        : data(_data)
+        , theta(_theta)
+        , p_yc(_p_yc)
+    { }
 
-    const int m = _data.rows, K = _theta.rows+1;
-    const int ones_idx = _theta.cols-1;
-    Mat z, sum_z;//, maxvals;
+    void operator()(const cv::Range& r) const
+    {
+        const Mat data_r = data.rowRange(r.start, r.end);
 
-    p_yc.create(m, K, CV_32F);
+        const int /*m = _data.rows,*/ K = theta.rows+1;
+        const int ones_idx = theta.cols-1;
+        Mat z, sum_z;//, maxvals;
 
-    // implicitly add the intercept terms if they don't exist in the data
-    if ( _data.cols < _theta.cols ) {
-        z = _data * _theta.colRange(0, ones_idx).t();  // (MxN) x ((K-1)x((N+1)-1))^T = Mx(K-1)
-        const Mat th_ones = _theta.col( ones_idx ).t(); // ((K-1)x1)^T = 1x(K-1)
-        for ( int i = 0; i < z.rows; ++i ) {
-            z.row( i ) += th_ones;
+        // implicitly add the intercept terms if they don't exist in the data
+        if ( data_r.cols < theta.cols ) {
+            z = data_r * theta.colRange(0, ones_idx).t();  // (MxN) x ((K-1)x((N+1)-1))^T = Mx(K-1)
+            const Mat th_ones = theta.col( ones_idx ).t(); // ((K-1)x1)^T = 1x(K-1)
+            for ( int i = 0; i < z.rows; ++i ) {
+                z.row( i ) += th_ones;
+            }
+        } else {
+            z = data_r * theta.t();  // (MxN+1) x ((K-1)x(N+1))^T = Mx(K-1)
         }
-    } else {
-        z = _data * _theta.t();  // (MxN+1) x ((K-1)x(N+1))^T = Mx(K-1)
-    }
 
 //    // subtract the largest element from each row to prevent overflow
 //    reduce(z, maxvals, 1, REDUCE_MAX);
 //    maxvals = max(maxvals, 0.0);
 //    for (int i = 0; i < z.cols; ++i ) z.col(i) -= maxvals;
 
-    // compute softmax
-    exp(z, z);
-    reduce(z, sum_z, 1, REDUCE_SUM);
-    sum_z += 1.0;
+        // compute softmax
+        exp(z, z);
+        reduce(z, sum_z, 1, REDUCE_SUM);
+        sum_z += 1.0;
 
 //    exp(-maxvals, maxvals);
 //    sum_z += maxvals;
 
-    CV_Assert(z.cols == K-1);
+        CV_Assert(z.cols == K-1);
 
-    p_yc.col(0) = 1.0 / sum_z; // add the column for the all-zero theta
-    for (int i = 0; i < z.cols; ++i) {
-        divide(z.col(i), sum_z, p_yc.col(i+1));
+        // normalize
+        p_yc.rowRange(r.start, r.end).col(0) = 1.0 / sum_z; // add the column for the all-zero theta
+        for (int i = 0; i < z.cols; ++i) {
+            divide(z.col(i), sum_z, p_yc.rowRange(r.start, r.end).col(i+1));
+        }
+    }
+};
+
+
+void LogisticRegressionImpl::compute_class_probabilities( const Mat & _data,
+        const Mat & _theta, Mat & p_yc ) const {
+
+    CV_Assert( _data.cols+1 == _theta.cols || _data.cols == _theta.cols );
+
+    const int m = _data.rows, K = _theta.rows+1;
+    p_yc.create(m, K, CV_32F);
+
+    LogisticRegressionImpl_ComputeClassProbs_Impl ccpi(_data, _theta, p_yc);
+
+    if ( params.train_parallel ) {
+        double nstripes = min(cv::getNumThreads(), cv::getNumberOfCPUs());
+        cv::parallel_for_(cv::Range(0, _data.rows), ccpi, nstripes);
+    } else {
+        ccpi(cv::Range(0, _data.rows));
     }
 }
 
@@ -466,61 +496,12 @@ double LogisticRegressionImpl::compute_cost(const Mat& _data, const Mat& _labels
     return cost;
 }
 
-//struct LogisticRegressionImpl_ComputeGradient_Impl : ParallelLoopBody
-//{
-//    const Mat* data;
-//    const Mat* theta;
-//    const Mat* pcal_a;
-//    Mat* gradient;
-//    double lambda;
-//
-//    LogisticRegressionImpl_ComputeGradient_Impl(const Mat& _data, const Mat &_theta, const Mat& _pcal_a, const double _lambda, Mat & _gradient)
-//        : data(&_data)
-//        , theta(&_theta)
-//        , pcal_a(&_pcal_a)
-//        , gradient(&_gradient)
-//        , lambda(_lambda)
-//    {
-//
-//    }
-//
-//    void operator()(const cv::Range& r) const
-//    {
-//        const Mat& _data  = *data;
-//        const Mat &_theta = *theta;
-//        Mat & _gradient   = *gradient;
-//        const Mat & _pcal_a = *pcal_a;
-//        const int m = _data.rows;
-//        Mat pcal_ab;
-//
-//        for (int ii = r.start; ii<r.end; ii++)
-//        {
-//            Mat pcal_b = _data(Range::all(), Range(ii,ii+1));
-//            multiply(_pcal_a, pcal_b, pcal_ab, 1);
-//
-//            _gradient.row(ii) = (1.0/m)*sum(pcal_ab)[0] + (lambda/m) * _theta.row(ii);
-//        }
-//    }
-//};
 
 void LogisticRegressionImpl::compute_gradient(const Mat& _data, const Mat& _labels, const Mat &_theta, const Mat& _p_yc, const double _lambda, Mat & _gradient )
 {
     const int m = _data.rows;
-//    Mat pcal_a, pcal_b, pcal_ab;
 
     CV_Assert( _gradient.rows == _theta.rows && _gradient.cols == _theta.cols );
-
-//    const Mat z = _data * _theta;
-//
-//    pcal_a = calc_sigmoid(z) - _labels.col(0);
-//    pcal_b = _data(Range::all(), Range(0,1));
-//    multiply(pcal_a, pcal_b, pcal_ab, 1);
-//
-//    _gradient.row(0) = ((float)1/m) * sum(pcal_ab)[0] + (_lambda/m) * _theta.row(0);
-//
-//    //cout<<"for each training data entry"<<endl;
-//    LogisticRegressionImpl_ComputeGradient_Impl invoker(_data, _theta, pcal_a, _lambda, _gradient);
-//    cv::parallel_for_(cv::Range(1, _gradient.rows), invoker);
 
     // we assume that the data has a column of ones included, and we ignore the
     // row of zeros in theta
@@ -815,6 +796,8 @@ void LogisticRegressionImpl::write(FileStorage& fs) const
         fs<<"mini_batch_size"<<this->params.mini_batch_size;
     fs<<"use_validation"<<this->params.test_data_is_validation;
     fs<<"max_no_improve_iters"<<this->params.max_iters_no_improvement;
+    fs<<"train_parallel"<<this->params.train_parallel;
+    fs<<"decrease_learning_rate"<<this->params.decrease_alpha;
     fs<<"use_one_vs_all"<<this->params.use_one_vs_all;
 
     fs<<"learnt_thetas"<<this->learnt_thetas;
@@ -841,6 +824,12 @@ void LogisticRegressionImpl::read(const FileNode& fn)
 
     if (!fn["max_no_improve_iters"].empty())
         fn["max_no_improve_iters"] >> this->params.max_iters_no_improvement;
+
+    if (!fn["train_parallel"].empty())
+        fn["train_parallel"] >> this->params.train_parallel;
+
+    if (!fn["decrease_learning_rate"].empty())
+        fn["decrease_learning_rate"] >> this->params.decrease_alpha;
 
     if (!fn["use_one_vs_all"].empty())
         fn["use_one_vs_all"] >> this->params.use_one_vs_all;
