@@ -71,7 +71,6 @@ public:
         train_method = LogisticRegression::BATCH;
         mini_batch_size = 1;
         term_crit = TermCriteria(TermCriteria::COUNT + TermCriteria::EPS, num_iters, alpha);
-        test_data_is_validation = false;
         max_iters_no_improvement = 0;
         record_train_period = 300;
         train_parallel = false;
@@ -85,7 +84,6 @@ public:
     int train_method;
     int mini_batch_size;
     TermCriteria term_crit;
-    bool test_data_is_validation; //!< true to use the test portion of the input training data as a validation set
     int max_iters_no_improvement; //!< max number of iterations to keep training if there's no improvement on validation set accuracy
     bool record_training; //!< true to record the cost and validation accuracy (if computed) for each training iteration
     int record_train_period; //!< record training performance at when (iter % record_train_period)==0
@@ -107,7 +105,6 @@ public:
     CV_IMPL_PROPERTY(int, TrainMethod, params.train_method)
     CV_IMPL_PROPERTY(int, MiniBatchSize, params.mini_batch_size)
     CV_IMPL_PROPERTY(TermCriteria, TermCriteria, params.term_crit)
-    CV_IMPL_PROPERTY(bool, UseValidationSet, params.test_data_is_validation)
     CV_IMPL_PROPERTY(int, MaxItersNoValidImprovement, params.max_iters_no_improvement)
     CV_IMPL_PROPERTY(bool, RecordTrainingPerf, params.record_training)
     CV_IMPL_PROPERTY(int, TrainingPerfRecordPeriod, params.record_train_period)
@@ -122,6 +119,7 @@ public:
     virtual void read(const FileNode& fn);
     virtual Mat get_learnt_thetas() const { return learnt_thetas; }
     virtual Mat2f get_training_perf() const { return training_perf; }
+    virtual void set_validation_data(const Ptr<const TrainData>& _validationData) { validationData = _validationData; }
     virtual int getVarCount() const { return learnt_thetas.cols; }
     virtual bool isTrained() const { return !learnt_thetas.empty(); }
     virtual bool isClassifier() const { return true; }
@@ -142,6 +140,7 @@ protected:
     LrParams params;
     Mat learnt_thetas;
     Mat2f training_perf;
+    Ptr<const TrainData> validationData;
     map<int, int> forward_mapper;
     map<int, int> reverse_mapper;
     Mat labels_o;
@@ -163,12 +162,10 @@ bool LogisticRegressionImpl::train(const Ptr<TrainData>& trainData, int)
     Mat _labels_i = trainData->getTrainResponses();
 
     Mat _data_val, _labels_val;
-    if ( params.test_data_is_validation
-            && trainData->getNTestSamples() > 0
-            /*&& params.max_iters_no_improvement > 0*/ )
+    if ( validationData && validationData->getNSamples() > 0 )
     {
-        _data_val = trainData->getTestSamples();
-        _labels_val = trainData->getTestResponses();
+        _data_val = trainData->getSamples();
+        _labels_val = trainData->getResponses();
     }
 
     // check size and type of training data
@@ -589,7 +586,7 @@ Mat LogisticRegressionImpl::batch_gradient_descent(const Mat& _data, const Mat& 
                     ++no_improve_count;
                     if ( params.decrease_alpha &&
                             (( no_improve_count % ( max_NI_iters / 4 )) == 0 )) {
-                        alpha /= 2.0;
+                        alpha /= 10.0;
                     }
                     if ( max_NI_iters > 0 && no_improve_count > max_NI_iters ) {
                         break;
@@ -689,7 +686,7 @@ Mat LogisticRegressionImpl::mini_batch_gradient_descent(const Mat& _data, const 
                         ++no_improve_count;
                         if ( params.decrease_alpha &&
                                 (( no_improve_count % ( max_NI_iters/4 )) == 0 )) {
-                            alpha /= 2.0;
+                            alpha /= 10.0;
                         }
                         if ( max_NI_iters > 0 &&
                                 no_improve_count > max_NI_iters ) {
@@ -793,7 +790,6 @@ void LogisticRegressionImpl::write(FileStorage& fs) const
     fs<<"train_method"<<this->params.train_method;
     if(this->params.train_method == LogisticRegression::MINI_BATCH)
         fs<<"mini_batch_size"<<this->params.mini_batch_size;
-    fs<<"use_validation"<<this->params.test_data_is_validation;
     fs<<"max_no_improve_iters"<<this->params.max_iters_no_improvement;
     fs<<"train_parallel"<<this->params.train_parallel;
     fs<<"decrease_learning_rate"<<this->params.decrease_alpha;
@@ -817,9 +813,6 @@ void LogisticRegressionImpl::read(const FileNode& fn)
 
     if (this->params.train_method == LogisticRegression::MINI_BATCH)
         this->params.mini_batch_size = (int)fn["mini_batch_size"];
-
-    if (!fn["use_validation"].empty())
-        fn["use_validation"] >> this->params.test_data_is_validation;
 
     if (!fn["max_no_improve_iters"].empty())
         fn["max_no_improve_iters"] >> this->params.max_iters_no_improvement;

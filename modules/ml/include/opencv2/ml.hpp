@@ -1463,14 +1463,6 @@ public:
     /** @copybrief getTermCriteria @see getTermCriteria */
     CV_WRAP virtual void setTermCriteria(TermCriteria val) = 0;
 
-    /** True to use the test data portion of the input training data as a
-     * validation set during training. This is used in conjunction with
-     * getMaxItersNoValidImprovement to perform early-stopping (default false). */
-    /** @see setUseValidationData */
-    CV_WRAP virtual bool getUseValidationSet() const = 0;
-    /** @copybrief getUseValidationData @see getUseValidationData */
-    CV_WRAP virtual void setUseValidationSet(bool val) = 0;
-
     /** The number of iterations of no accuracy improvement on the validation
      * set after which to stop training (early-stopping). Only relevant if
      * useValidationData is true. (default is 0, meaning off) */
@@ -1550,6 +1542,8 @@ public:
      * accuracy per iteration of training.
      * @returns A Mat of type CV_32F of size num_training_iters x 2. */
     CV_WRAP virtual Mat2f get_training_perf() const = 0;
+
+    CV_WRAP virtual void set_validation_data(const Ptr<const TrainData>& validationData) = 0;
 
     /** @brief Creates empty model.
 
