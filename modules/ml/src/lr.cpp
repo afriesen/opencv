@@ -164,8 +164,8 @@ bool LogisticRegressionImpl::train(const Ptr<TrainData>& trainData, int)
     Mat _data_val, _labels_val;
     if ( validationData && validationData->getNSamples() > 0 )
     {
-        _data_val = trainData->getSamples();
-        _labels_val = trainData->getResponses();
+        _data_val = validationData->getSamples();
+        _labels_val = validationData->getResponses();
     }
 
     // check size and type of training data
@@ -502,7 +502,7 @@ void LogisticRegressionImpl::compute_gradient(const Mat& _data, const Mat& _labe
     // we assume that the data has a column of ones included, and we ignore the
     // row of zeros in theta
     const int K = _p_yc.cols;
-    _gradient = (1.0/m) * ( _p_yc.colRange(1, K) - _labels.colRange(1, K) ).t() * _data + (_lambda/m)*_theta;
+    _gradient = ( _p_yc.colRange(1, K) - _labels.colRange(1, K) ).t() * _data + _lambda*_theta;
 
 //    check_gradient(_gradient, _data, _labels, _theta, _lambda);
 }
