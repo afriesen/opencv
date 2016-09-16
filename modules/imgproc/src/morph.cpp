@@ -1079,7 +1079,7 @@ namespace cv
 
 // ===== 1. replacement implementation
 
-struct ReplacementMorphImpl : public hal::MorphContext
+struct ReplacementMorphImpl : public hal::Morph
 {
     cvhalFilter2D * ctx;
     bool isInitialized;
@@ -1145,10 +1145,10 @@ struct IppMorphTrait<cvtype>\
     IppStatus morphInit(IppiSize roiSize, const Ipp8u* pMask, IppiSize maskSize, IppiMorphState* pMorphSpec, Ipp8u* pBuffer) {return ippiMorphologyBorderInit_##flavor(roiSize, pMask, maskSize, pMorphSpec, pBuffer);}\
     IppStatus filterGetMinSize(IppiSize dstRoiSize, IppiSize maskSize, IppDataType dataType, int numChannels, int* pBufferSize) {return ippiFilterMinBorderGetBufferSize(dstRoiSize, maskSize, dataType, numChannels, pBufferSize);}\
     IppStatus filterGetMaxSize(IppiSize dstRoiSize, IppiSize maskSize, IppDataType dataType, int numChannels, int* pBufferSize) {return ippiFilterMaxBorderGetBufferSize(dstRoiSize, maskSize, dataType, numChannels, pBufferSize);}\
-    IppStatus filterMinBorder(const ipp_data_type* pSrc, int srcStep, ipp_data_type* pDst, int dstStep, IppiSize dstRoiSize, IppiSize maskSize, IppiPoint, Ipp8u* pBuffer) { ipp_data_type zerodef; return ippiFilterMinBorder_##flavor(pSrc, srcStep, pDst, dstStep, dstRoiSize, maskSize, ippBorderRepl, zero, pBuffer); }\
-    IppStatus filterMaxBorder(const ipp_data_type* pSrc, int srcStep, ipp_data_type* pDst, int dstStep, IppiSize dstRoiSize, IppiSize maskSize, IppiPoint, Ipp8u* pBuffer) { ipp_data_type zerodef; return ippiFilterMaxBorder_##flavor(pSrc, srcStep, pDst, dstStep, dstRoiSize, maskSize, ippBorderRepl, zero, pBuffer); }\
-    IppStatus morphDilate(const ipp_data_type* pSrc, int srcStep, ipp_data_type* pDst, int dstStep, IppiSize roiSize, const IppiMorphState* pMorphSpec, Ipp8u* pBuffer) { ipp_data_type zerodef; return ippiDilateBorder_##flavor(pSrc, srcStep, pDst, dstStep, roiSize, ippBorderRepl, zero, pMorphSpec, pBuffer); }\
-    IppStatus morphErode(const ipp_data_type* pSrc, int srcStep, ipp_data_type* pDst, int dstStep, IppiSize roiSize,  const IppiMorphState* pMorphSpec, Ipp8u* pBuffer) { ipp_data_type zerodef; return ippiErodeBorder_##flavor(pSrc, srcStep, pDst, dstStep, roiSize, ippBorderRepl, zero, pMorphSpec, pBuffer); }\
+    IppStatus filterMinBorder(const ipp_data_type* pSrc, int srcStep, ipp_data_type* pDst, int dstStep, IppiSize dstRoiSize, IppiSize maskSize, IppiPoint, Ipp8u* pBuffer) { ipp_data_type zerodef; return CV_INSTRUMENT_FUN_IPP(ippiFilterMinBorder_##flavor, pSrc, srcStep, pDst, dstStep, dstRoiSize, maskSize, ippBorderRepl, zero, pBuffer); }\
+    IppStatus filterMaxBorder(const ipp_data_type* pSrc, int srcStep, ipp_data_type* pDst, int dstStep, IppiSize dstRoiSize, IppiSize maskSize, IppiPoint, Ipp8u* pBuffer) { ipp_data_type zerodef; return CV_INSTRUMENT_FUN_IPP(ippiFilterMaxBorder_##flavor, pSrc, srcStep, pDst, dstStep, dstRoiSize, maskSize, ippBorderRepl, zero, pBuffer); }\
+    IppStatus morphDilate(const ipp_data_type* pSrc, int srcStep, ipp_data_type* pDst, int dstStep, IppiSize roiSize, const IppiMorphState* pMorphSpec, Ipp8u* pBuffer) { ipp_data_type zerodef; return CV_INSTRUMENT_FUN_IPP(ippiDilateBorder_##flavor, pSrc, srcStep, pDst, dstStep, roiSize, ippBorderRepl, zero, pMorphSpec, pBuffer); }\
+    IppStatus morphErode(const ipp_data_type* pSrc, int srcStep, ipp_data_type* pDst, int dstStep, IppiSize roiSize,  const IppiMorphState* pMorphSpec, Ipp8u* pBuffer) { ipp_data_type zerodef; return CV_INSTRUMENT_FUN_IPP(ippiErodeBorder_##flavor, pSrc, srcStep, pDst, dstStep, roiSize, ippBorderRepl, zero, pMorphSpec, pBuffer); }\
 };
 
 #else
@@ -1184,7 +1184,7 @@ INIT_TRAIT(CV_32FC4, 32f, 32f_C4R, 4, zero[4] = {0})
 
 //--------------------------------------
 
-struct IppMorphBaseImpl : public hal::MorphContext
+struct IppMorphBaseImpl : public hal::Morph
 {
     virtual bool init(int _op, int _src_type, int dst_type, int max_width, int max_height,
               int kernel_type, uchar * kernel_data, size_t kernel_step, int kernel_width, int kernel_height,
@@ -1333,6 +1333,8 @@ struct IppMorphImpl : public IppMorphBaseImpl
                int roi_width, int roi_height, int roi_x, int roi_y,
                int roi_width2, int roi_height2, int roi_x2, int roi_y2)
     {
+        CV_INSTRUMENT_REGION_IPP()
+
         CV_UNUSED(roi_width); CV_UNUSED(roi_height); CV_UNUSED(roi_x); CV_UNUSED(roi_y);
         CV_UNUSED(roi_width2); CV_UNUSED(roi_height2); CV_UNUSED(roi_x2); CV_UNUSED(roi_y2);
         if (src_data == dst_data)
@@ -1379,7 +1381,7 @@ static IppMorphBaseImpl * createIppImpl(int type)
 
 // ===== 3. Fallback implementation
 
-struct OcvMorphImpl : public hal::MorphContext
+struct OcvMorphImpl : public hal::Morph
 {
     Ptr<FilterEngine> f;
     int iterations;
@@ -1425,7 +1427,7 @@ struct OcvMorphImpl : public hal::MorphContext
 
 namespace hal {
 
-Ptr<MorphContext> MorphContext ::create(int op, int src_type, int dst_type, int max_width, int max_height,
+Ptr<Morph> Morph ::create(int op, int src_type, int dst_type, int max_width, int max_height,
                                         int kernel_type, uchar * kernel_data, size_t kernel_step, int kernel_width, int kernel_height,
                                         int anchor_x, int anchor_y,
                                         int borderType, const double borderValue[4],
@@ -1438,7 +1440,7 @@ Ptr<MorphContext> MorphContext ::create(int op, int src_type, int dst_type, int 
                        anchor_x, anchor_y,
                        borderType, borderValue, iterations, isSubmatrix, allowInplace))
         {
-            return Ptr<MorphContext>(impl);
+            return Ptr<Morph>(impl);
         }
         delete impl;
     }
@@ -1453,7 +1455,7 @@ Ptr<MorphContext> MorphContext ::create(int op, int src_type, int dst_type, int 
                         anchor_x, anchor_y,
                         borderType, borderValue, iterations, isSubmatrix, allowInplace))
             {
-                return Ptr<MorphContext>(impl);
+                return Ptr<Morph>(impl);
             }
             delete impl;
         }
@@ -1465,7 +1467,7 @@ Ptr<MorphContext> MorphContext ::create(int op, int src_type, int dst_type, int 
                 kernel_type, kernel_data, kernel_step, kernel_width, kernel_height,
                 anchor_x, anchor_y,
                 borderType, borderValue, iterations, isSubmatrix, allowInplace);
-        return Ptr<MorphContext>(impl);
+        return Ptr<Morph>(impl);
     }
 }
 
@@ -1858,7 +1860,7 @@ static void morphOp( int op, InputArray _src, OutputArray _dst,
     Size d_wsz(dst.cols, dst.rows);
     dst.locateROI(d_wsz, d_ofs);
 
-    Ptr<hal::MorphContext> ctx = hal::MorphContext::create(op, src.type(), dst.type(), src.cols, src.rows,
+    Ptr<hal::Morph> ctx = hal::Morph::create(op, src.type(), dst.type(), src.cols, src.rows,
                                                            kernel.type(), kernel.data, kernel.step, kernel.cols, kernel.rows,
                                                            anchor.x, anchor.y, borderType, borderValue.val, iterations,
                                                            src.isSubmatrix(), src.data == dst.data);
@@ -1873,6 +1875,8 @@ void cv::erode( InputArray src, OutputArray dst, InputArray kernel,
                 Point anchor, int iterations,
                 int borderType, const Scalar& borderValue )
 {
+    CV_INSTRUMENT_REGION()
+
     morphOp( MORPH_ERODE, src, dst, kernel, anchor, iterations, borderType, borderValue );
 }
 
@@ -1881,6 +1885,8 @@ void cv::dilate( InputArray src, OutputArray dst, InputArray kernel,
                  Point anchor, int iterations,
                  int borderType, const Scalar& borderValue )
 {
+    CV_INSTRUMENT_REGION()
+
     morphOp( MORPH_DILATE, src, dst, kernel, anchor, iterations, borderType, borderValue );
 }
 
@@ -1952,6 +1958,8 @@ void cv::morphologyEx( InputArray _src, OutputArray _dst, int op,
                        InputArray _kernel, Point anchor, int iterations,
                        int borderType, const Scalar& borderValue )
 {
+    CV_INSTRUMENT_REGION()
+
     Mat kernel = _kernel.getMat();
     if (kernel.empty())
     {

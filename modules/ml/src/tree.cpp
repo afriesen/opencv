@@ -1690,6 +1690,7 @@ void DTreesImpl::writeTree( FileStorage& fs, int root ) const
 
 void DTreesImpl::write( FileStorage& fs ) const
 {
+    writeFormat(fs);
     writeParams(fs);
     writeTree(fs, roots[0]);
 }

@@ -781,6 +781,7 @@ void LogisticRegressionImpl::write(FileStorage& fs) const
     if(fs.isOpened() == 0)
         CV_Error(CV_StsBadArg,"file can't open. Check file path");
 
+    writeFormat(fs);
     string desc = "Logistic Regression Classifier";
     fs<<"classifier"<<desc.c_str();
 
